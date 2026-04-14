@@ -54,6 +54,55 @@ python3 app.py
 
 执行启动命令后访问 Web 地址进入监控面板。确认 PLC 寄存器基址为 0。部署前验证树莓派与 PLC 网络连通性。
 
+
+
+
+
+## API接口
+
+集成 RESTful API 的完整 Sanic 应用代码。代码保留原有 Web 面板功能，新增 `/api/v1/` 命名空间的标准资源接口。
+
+### RESTful API 接口规范
+
+| 方法 | 路径 | 说明 | 请求体示例 | 成功响应 |
+|---|---|---|---|---|
+| `GET` | `/api/v1/status` | 获取连接状态 | 无 | `{"connected": true, "last_update": "...", "error": null}` |
+| `GET` | `/api/v1/variables` | 获取全部变量 | 无 | `{ "alarms": {...}, "meters": {...}, ... }` |
+| `GET` | `/api/v1/variables?category=alarms` | 按类别筛选 | 无 | `{ "alarms": {"100": 0, ...} }` |
+| `GET` | `/api/v1/variables/<addr>` | 读取单点 | 无 | `{"address": 400, "category": "controls", "value": 0}` |
+| `PUT` | `/api/v1/variables/<addr>` | 写入单点 | `{"value": 1}` | `{"status": "success", "address": 400, "value": 1}` |
+| `POST` | `/api/v1/config` | 更新轮询参数 | `{"poll_interval": 1.5, "plc_ip": "..."}` | `{"status": "configuration updated"}` |
+
+### 外部调用示例
+
+**Python requests 客户端**
+```python
+import requests
+
+BASE_URL = "http://192.168.0.112:5000/api/v1"
+
+# 读取全部变量
+all_vars = requests.get(f"{BASE_URL}/variables").json()
+
+# 读取单点地址 100
+val_100 = requests.get(f"{BASE_URL}/variables/100").json()
+
+# 写入控制指令 (打开厨房切断阀)
+res = requests.put(f"{BASE_URL}/variables/400", json={"value": 1})
+print(res.json())
+```
+
+**curl 命令行**
+```bash
+# 读取变量
+curl -s http://localhost:5000/api/v1/variables/101 | jq
+# 写入变量
+curl -s -X PUT http://localhost:5000/api/v1/variables/400 -H "Content-Type: application/json" -d '{"value": 1}'
+```
+
+部署流程保持原有步骤。访问 `/api/v1/` 路径接入第三方系统。地址 400、401、410 开放写入权限，其余地址保持只读保护。
+
+
 ## 运行截图
 ![](https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.17.png)
 ![](https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.28.png)
