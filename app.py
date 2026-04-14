@@ -9,7 +9,7 @@ from sanic import Sanic, response
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Sanic("PLC_Monitor")
 
-config = {"plc_ip": "192.168.1.112", "plc_port": 502, "unit_id": 1, "poll_interval": 2.0, "timeout": 3.0}
+config = {"plc_ip": "192.168.0.112", "plc_port": 502, "unit_id": 1, "poll_interval": 2.0, "timeout": 3.0}
 data_store = {
     "connected": False, "last_update": None, "error": None,
     "alarms": {100: 0, 101: 0, 102: 0},
@@ -22,6 +22,23 @@ lock = threading.Lock()
 stop_event = asyncio.Event()
 poll_task = None
 client = None
+
+# 可写入地址白名单
+WRITABLE_ADDRS = {400, 401, 410}
+
+def _lookup_value(addr: int) -> dict | None:
+    with lock:
+        for category, mapping in data_store.items():
+            if isinstance(mapping, dict) and addr in mapping:
+                return {"address": addr, "category": category, "value": mapping[addr]}
+    return None
+
+def _update_local_cache(addr: int, val: int) -> None:
+    with lock:
+        for category, mapping in data_store.items():
+            if isinstance(mapping, dict) and addr in mapping:
+                mapping[addr] = val
+                break
 
 async def modbus_worker():
     global client
@@ -88,43 +105,80 @@ async def stop_poll(app, loop):
     if poll_task: poll_task.cancel()
     if client: client.close()
 
-@app.route("/")
-async def index(request):
-    return response.html(HTML_TEMPLATE)
-
-@app.route("/api/data")
-async def get_data(request):
+# ================= 前端兼容接口 =================
+@app.get("/api/data")
+async def get_data_legacy(request):
     with lock:
         return response.json(data_store)
 
-@app.route("/api/config", methods=["POST"])
-async def set_config(request):
-    global poll_task, stop_event
-    config.update(request.json)
-    stop_event.set()
-    if poll_task: poll_task.cancel()
-    await asyncio.sleep(0.1)
-    stop_event.clear()
-    poll_task = asyncio.create_task(modbus_worker())
-    return response.json({"status": "ok"})
+@app.get("/")
+async def index(request):
+    return response.html(HTML_TEMPLATE)
 
-@app.route("/api/write", methods=["POST"])
-async def write_register(request):
-    data = request.json
-    addr = data.get("address")
-    val = data.get("value")
-    if addr is None or val is None:
-        return response.json({"error": "Missing params"}, status=400)
+# ================= RESTful v1 API =================
+@app.get("/api/v1/status")
+async def api_status(request):
+    with lock:
+        return response.json({
+            "connected": data_store["connected"],
+            "last_update": data_store["last_update"],
+            "error": data_store["error"]
+        })
+
+@app.get("/api/v1/variables")
+async def api_get_variables(request):
+    category = request.args.get("category")
+    with lock:
+        if category and category in data_store:
+            return response.json({category: dict(data_store[category])})
+        return response.json({cat: dict(data_store[cat]) for cat in data_store if isinstance(data_store[cat], dict)})
+
+@app.get("/api/v1/variables/<addr:int>")
+async def api_get_variable(request, addr):
+    result = _lookup_value(addr)
+    if result:
+        return response.json(result)
+    return response.json({"error": "Address not mapped in data store"}, status=404)
+
+@app.put("/api/v1/variables/<addr:int>")
+async def api_put_variable(request, addr):
+    payload = request.json
+    if not payload or "value" not in payload:
+        return response.json({"error": "JSON body requires 'value' field"}, status=400)
+    
+    val = payload["value"]
+    if not isinstance(val, int):
+        return response.json({"error": "Value must be integer"}, status=400)
+    if addr not in WRITABLE_ADDRS:
+        return response.json({"error": "Address is read-only. Use writable addresses: 400, 401, 410"}, status=403)
+
     try:
         if client is None or not client.connected:
-            return response.json({"error": "Not connected"}, status=503)
+            return response.json({"error": "PLC disconnected"}, status=503)
         loop = asyncio.get_running_loop()
         res = await loop.run_in_executor(None, client.write_register, addr, val, config["unit_id"])
         if res.isError():
-            return response.json({"error": "Write failed"}, status=500)
-        return response.json({"status": "ok"})
+            return response.json({"error": "Modbus write operation failed"}, status=500)
+        
+        _update_local_cache(addr, val)
+        return response.json({"status": "success", "address": addr, "value": val})
     except Exception as e:
         return response.json({"error": str(e)}, status=500)
+
+@app.post("/api/v1/config")
+async def set_config(request):
+    global poll_task, stop_event
+    payload = request.json
+    if "poll_interval" in payload: config["poll_interval"] = float(payload["poll_interval"])
+    if "plc_ip" in payload: config["plc_ip"] = payload["plc_ip"]
+    if "plc_port" in payload: config["plc_port"] = int(payload["plc_port"])
+    
+    stop_event.set()
+    if poll_task: poll_task.cancel()
+    await asyncio.sleep(0.2)
+    stop_event.clear()
+    poll_task = asyncio.create_task(modbus_worker())
+    return response.json({"status": "configuration updated"})
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -245,16 +299,15 @@ HTML_TEMPLATE = """
         </div>
     </div>
     <script>
-        let updateInterval;
         function openSettings() { document.getElementById('settingsModal').classList.remove('hidden'); }
         function closeSettings() { document.getElementById('settingsModal').classList.add('hidden'); }
         async function saveSettings() {
             const config = { plc_ip: document.getElementById('settingIp').value, plc_port: parseInt(document.getElementById('settingPort').value), poll_interval: parseFloat(document.getElementById('settingInterval').value) };
-            try { const res = await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) }); if (res.ok) { closeSettings(); location.reload(); } } catch (e) { alert('保存设置失败: ' + e); }
+            try { const res = await fetch('/api/v1/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) }); if (res.ok) { closeSettings(); location.reload(); } } catch (e) { alert('保存设置失败: ' + e); }
         }
         async function toggleControl(addr) {
             const value = document.getElementById('toggle' + addr).checked ? 1 : 0;
-            try { const res = await fetch('/api/write', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({address: addr, value: value}) }); if (!res.ok) { document.getElementById('toggle' + addr).checked = !document.getElementById('toggle' + addr).checked; alert('写入失败'); } } catch (e) { document.getElementById('toggle' + addr).checked = !document.getElementById('toggle' + addr).checked; alert('通讯错误: ' + e); }
+            try { const res = await fetch('/api/v1/variables/' + addr, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({value: value}) }); if (!res.ok) { document.getElementById('toggle' + addr).checked = !document.getElementById('toggle' + addr).checked; alert('写入失败'); } } catch (e) { document.getElementById('toggle' + addr).checked = !document.getElementById('toggle' + addr).checked; alert('通讯错误: ' + e); }
         }
         function updateUI(data) {
             const statusEl = document.getElementById('connectionStatus');
@@ -279,7 +332,7 @@ HTML_TEMPLATE = """
             for (let addr of [600, 610, 620]) { document.getElementById('gas' + addr).textContent = data.gas[addr] || 0; }
         }
         async function fetchData() { try { const response = await fetch('/api/data'); const data = await response.json(); updateUI(data); } catch (error) { console.error('获取数据失败:', error); } }
-        fetchData(); updateInterval = setInterval(fetchData, 2000);
+        fetchData(); setInterval(fetchData, 2000);
     </script>
 </body>
 </html>
