@@ -52,8 +52,10 @@ python3 app.py
 
 配置参数通过 `/api/config` 接口动态加载。Modbus 客户端使用 `asyncio.get_running_loop().run_in_executor` 移交同步请求至线程池。数据字典通过 `threading.Lock` 保护并发读写。轮询间隔默认 2 秒，支持前端页面实时调整。
 
-## 运行截图
-[]{https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.17.png}
-[]{https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.28.png}
-
 执行启动命令后访问 Web 地址进入监控面板。确认 PLC 寄存器基址为 0。部署前验证树莓派与 PLC 网络连通性。
+
+## 运行截图
+![](https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.17.png)
+![](https://raw.githubusercontent.com/dangerwolf/dangerwolf-raspi-plc-demo/refs/heads/main/Screenshot/iShot_2026-04-14_18.02.28.png)
+
+
